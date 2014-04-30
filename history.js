@@ -23,6 +23,53 @@
     copy = angular.copy,
     bind = angular.bind;
 
+  /**
+   * Polyfill for Object.keys
+   *
+   * @see: https://developer.mozilla.org/en-US/docs/JavaScript/Reference/Global_Objects/Object/keys
+   */
+  if (!Object.keys) {
+    Object.keys = (function () {
+      var hasOwnProperty = Object.prototype.hasOwnProperty,
+        hasDontEnumBug = !({toString: null}).propertyIsEnumerable('toString'),
+        dontEnums = [
+          'toString',
+          'toLocaleString',
+          'valueOf',
+          'hasOwnProperty',
+          'isPrototypeOf',
+          'propertyIsEnumerable',
+          'constructor'
+        ],
+        dontEnumsLength = dontEnums.length;
+
+      return function (obj) {
+        if (typeof obj !== 'object' && typeof obj !== 'function' ||
+          obj === null) {
+          throw new TypeError('Object.keys called on non-object');
+        }
+
+        var result = [];
+
+        for (var prop in obj) {
+          if (hasOwnProperty.call(obj, prop)) {
+            result.push(prop);
+          }
+        }
+
+        if (hasDontEnumBug) {
+          for (var i = 0; i < dontEnumsLength; i++) {
+            if (hasOwnProperty.call(obj,
+              dontEnums[i])) {
+              result.push(dontEnums[i]);
+            }
+          }
+        }
+        return result;
+      };
+    })();
+  }
+
   // stub out lazyBind if we don't have it.
   try {
     angular.module('lazyBind');
@@ -41,12 +88,14 @@
   angular.module('decipher.history', ['lazyBind']).service('History',
     function ($parse, $rootScope, $interpolate, $lazyBind, $timeout, $log,
       $injector) {
-      var history = {},
+      var service = this,
+        history = {},
         pointers = {},
         watches = {},
         watchObjs = {},
         lazyWatches = {},
         descriptions = {},
+      // TODO: async safe?
         batching = false, // whether or not we are currently in a batch
         deepWatchId = 0; // incrementing ID of deep {@link decipher.history.object:Watch Watch instance}s
 
@@ -62,14 +111,22 @@
        * Each function return the `Watch` instance, so you can chain the calls.
        *
        * See the docs for {@link decipher.history.service:History#deepWatch History.deepWatch()} for an example of using these functions.
+       *
+       * @todo ability to remove all handlers at once, or all handlers of a certain type
        */
-      var Watch = function Watch(t) {
-        this.transaction = t;
-        this._changeHandlers = {};
-        this._undoHandlers = {};
-        this._rollbackHandlers = {};
-        this._redoHandlers = {};
-        this._revertHandlers = {};
+      var Watch = function Watch(exp, scope) {
+        this.exp = exp;
+        this.scope = scope || $rootScope;
+
+        this.$handlers = {
+          $change : {},
+          $undo : {},
+          $rollback : {},
+          $redo : {},
+          $revert : {},
+        };
+
+        this.$ignores = {};
       };
 
       /**
@@ -85,9 +142,9 @@
       Watch.prototype._addHandler =
         function _addHandler(where, name, fn, resolve) {
           if (!where || !name || !fn) {
-            throw 'invalid parameters to _addHandler()';
+            throw new Error('invalid parameters to _addHandler()');
           }
-          this[where][name] = {
+          this.$handlers[where][name] = {
             fn: fn,
             resolve: resolve || {}
           };
@@ -104,9 +161,9 @@
        */
       Watch.prototype._removeHandler = function (where, name) {
         if (!name) {
-          throw 'invalid parameters to _removeHandler()';
+          throw new Error('invalid parameters to _removeHandler()');
         }
-        delete this[where][name];
+        delete this.$handlers[where][name];
         return this;
       };
 
@@ -126,9 +183,9 @@
       Watch.prototype.addChangeHandler =
         function addChangeHandler(name, fn, resolve) {
           if (!name || !fn) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._addHandler('_changeHandlers', name, fn, resolve);
+          return this._addHandler('$change', name, fn, resolve);
         };
       /**
        * @ngdoc function
@@ -146,9 +203,9 @@
       Watch.prototype.addUndoHandler =
         function addUndoHandler(name, fn, resolve) {
           if (!name || !fn) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._addHandler('_undoHandlers', name, fn, resolve);
+          return this._addHandler('$undo', name, fn, resolve);
         };
       /**
        * @ngdoc function
@@ -166,9 +223,9 @@
       Watch.prototype.addRedoHandler =
         function addRedoHandler(name, fn, resolve) {
           if (!name || !fn) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._addHandler('_redoHandlers', name, fn, resolve);
+          return this._addHandler('$redo', name, fn, resolve);
         };
       /**
        * @ngdoc function
@@ -186,13 +243,13 @@
       Watch.prototype.addRevertHandler =
         function addRevertHandler(name, fn, resolve) {
           if (!name || !fn) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._addHandler('_revertHandlers', name, fn, resolve);
+          return this._addHandler('$revert', name, fn, resolve);
         };
       /**
        * @ngdoc function
-       * @name decipher.history.object:Watch#addChangeHandler
+       * @name decipher.history.object:Watch#addRollbackHandler
        * @methodOf decipher.history.object:Watch
        * @method
        * @param {string} name Unique name of handler
@@ -206,9 +263,9 @@
       Watch.prototype.addRollbackHandler =
         function addRollbackHandler(name, fn, resolve) {
           if (!name || !fn) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._addHandler('_rollbackHandlers', name, fn, resolve);
+          return this._addHandler('$rollback', name, fn, resolve);
         };
 
       /**
@@ -223,9 +280,9 @@
        */
       Watch.prototype.removeRevertHandler = function removeRevertHandler(name) {
         if (!name) {
-          throw 'invalid parameters';
+          throw new Error('invalid parameters');
         }
-        return this._removeHandler('_revertHandlers', name);
+        return this._removeHandler('$revert', name);
       };
       /**
        * @ngdoc function
@@ -239,9 +296,9 @@
        */
       Watch.prototype.removeChangeHandler = function removeChangeHandler(name) {
         if (!name) {
-          throw 'invalid parameters';
+          throw new Error('invalid parameters');
         }
-        return this._removeHandler('_changeHandlers', name);
+        return this._removeHandler('$change', name);
       };
       /**
        * @ngdoc function
@@ -255,9 +312,9 @@
        */
       Watch.prototype.removeUndoHandler = function removeUndoHandler(name) {
         if (!name) {
-          throw 'invalid parameters';
+          throw new Error('invalid parameters');
         }
-        return this._removeHandler('_undoHandlers', name);
+        return this._removeHandler('$undo', name);
       };
 
       /**
@@ -272,7 +329,7 @@
        */
       Watch.prototype.removeRollbackHandler =
         function removeRollbackHandler(name) {
-          return this._removeHandler('_rollbackHandlers', name);
+          return this._removeHandler('$rollback', name);
         };
 
       /**
@@ -288,9 +345,9 @@
       Watch.prototype.removeRedoHandler =
         function removeRedoHandler(name) {
           if (!name) {
-            throw 'invalid parameters';
+            throw new Error('invalid parameters');
           }
-          return this._removeHandler('_redoHandlers', name);
+          return this._removeHandler('$redo', name);
         };
 
       /**
@@ -303,10 +360,10 @@
       Watch.prototype._fireHandlers =
         function _fireHandlers(where, exp, scope) {
           var hasScope = isDefined(scope),
-            t = this.transaction, that = this;
-          forEach(this[where], function (handler) {
+            localScope = this.scope, that = this;
+          forEach(this.$handlers[where], function (handler) {
             var locals = {
-              $locals: t
+              $locals: localScope
             };
             if (isDefined(scope)) {
               locals.$locals = scope;
@@ -333,7 +390,7 @@
        */
       Watch.prototype._fireChangeHandlers =
         function _fireChangeHandlers(exp, scope) {
-          this._fireHandlers('_changeHandlers', exp, scope);
+          this._fireHandlers('$change', exp, scope);
         };
 
       /**
@@ -344,7 +401,7 @@
        */
       Watch.prototype._fireUndoHandlers =
         function _fireUndoHandlers(exp, scope) {
-          this._fireHandlers('_undoHandlers', exp, scope);
+          this._fireHandlers('$undo', exp, scope);
         };
 
       /**
@@ -355,7 +412,7 @@
        */
       Watch.prototype._fireRedoHandlers =
         function _fireRedoHandlers(exp, scope) {
-          this._fireHandlers('_redoHandlers', exp, scope);
+          this._fireHandlers('$redo', exp, scope);
         };
 
       /**
@@ -366,7 +423,7 @@
        */
       Watch.prototype._fireRevertHandlers =
         function _fireRevertHandlers(exp, scope) {
-          this._fireHandlers('_revertHandlers', exp, scope);
+          this._fireHandlers('$revert', exp, scope);
         };
 
       /**
@@ -375,8 +432,106 @@
        */
       Watch.prototype._fireRollbackHandlers =
         function _fireRollbackHandlers() {
-          this._fireHandlers('_rollbackHandlers');
+          this._fireHandlers('$rollback');
         };
+
+      /**
+       * Decline to broadcast an event for this Watch.
+       * @param {string} eventName Name of event to avoid.  i.e. "History.archived"
+       * @param {Function=} callback Optional callback
+       * @param {Object=} resolve Optional mapping of parameters to invoke
+       * the callback with.
+       * @returns {Watch} this Watch object
+       */
+      Watch.prototype.ignoreEvent =
+        function ignoreEvent(eventName, callback, resolve) {
+          // special case; we cannot ignore History.archived within a Watch obj
+          // created from a batch.  there may be a way around this.
+          if (this.exp === null && eventName === 'History.archived') {
+            $log.warn('cannot ignore History.archived event for batch');
+            return this;
+          }
+          resolve = resolve || {};
+          if (isFunction(callback)) {
+            this.$ignores[eventName] = {
+              callback: callback,
+              resolve: resolve
+            };
+          } else if (isDefined(callback)) {
+            this.$ignores[eventName] = {
+              callback: function cb() {
+                return callback;
+              },
+              resolve: resolve
+            };
+          }
+          return this;
+        };
+
+      /**
+       * Broadcasts an event, taking ignored events into account.
+       * @param {string} eventName Event to broadcast
+       * @param {*} data Some data to pass
+       * @private
+       */
+      Watch.prototype._broadcast = function _broadcast(eventName, data) {
+        var ignore = this.$ignores[eventName];
+        if (!ignore ||
+          (isFunction(ignore.callback) &&
+            !$injector.invoke(ignore.callback, this.scope, ignore.resolve))) {
+          $rootScope.$broadcast(eventName, data);
+        }
+      };
+
+      /**
+       * Undoes last change against this watch object's target.
+       */
+      Watch.prototype.undo = function undo() {
+        if (this.exp === null) {
+          $log.warn("attempt to undo a batch; use rollback() instead");
+          return;
+        }
+        service.undo(this.exp, this.scope);
+      };
+
+      /**
+       * Redoes last undo against this watch object's target.
+       */
+      Watch.prototype.redo = function redo() {
+        if (this.exp === null) {
+          $log.warn("attempt to redo a batch; just execute the batch callback again");
+        }
+        service.redo(this.exp, this.scope);
+      };
+
+      /**
+       * Reverts this target's watch object.
+       * @param {number=0} pointer Pointer to revert to
+       */
+      Watch.prototype.revert = function revert(pointer) {
+        if (this.exp === null) {
+          $log.warn("attempt to revert a batch; use rollback() instead");
+        }
+        service.revert(this.exp, this.scope, pointer);
+      };
+
+      /**
+       * Whether or not you may undo this watch object's target
+       * @returns {boolean}
+       */
+      Watch.prototype.canUndo = function canUndo() {
+        return this.exp === null ? false :
+               service.canUndo(this.exp, this.scope);
+      };
+
+      /**
+       * Whether or not you may redo this watch object's target
+       * @returns {boolean}
+       */
+      Watch.prototype.canRedo = function canRedo() {
+        return this.exp === null ? false :
+               service.canRedo(this.exp, this.scope);
+      };
 
       /**
        * Evaluates an expression on the scope lazily.  That means it will return
@@ -442,6 +597,7 @@
       this._archive = function (exp, id, locals, pass, description) {
         var _initStores = this._initStores;
         return function (newVal, oldVal) {
+          var watchObj;
           _initStores(id);
           if (description) {
             descriptions[id][exp] = $interpolate(description)(locals);
@@ -450,21 +606,21 @@
             pass = false;
             return;
           }
-          if (angular.isUndefined(history[id][exp])) {
+          if (isUndefined(history[id][exp])) {
             history[id][exp] = [];
           }
-          if (angular.isUndefined(pointers[id][exp])) {
+          if (isUndefined(pointers[id][exp])) {
             pointers[id][exp] = 0;
           }
           history[id][exp].splice(pointers[id][exp] + 1);
           history[id][exp].push(copy(newVal));
           pointers[id][exp] = history[id][exp].length - 1;
-          if (pointers[id][exp] > 0) {
-            if (!batching && isDefined(watchObjs[id]) &&
-              isDefined(watchObjs[id][exp])) {
-              watchObjs[id][exp]._fireChangeHandlers(exp, locals);
+          if (pointers[id][exp] > 0 && isDefined(watchObjs[id]) &&
+            isDefined(watchObj = watchObjs[id][exp])) {
+            if (!batching) {
+              watchObj._fireChangeHandlers(exp, locals);
             }
-            $rootScope.$broadcast('History.archived', {
+            watchObj._broadcast('History.archived', {
               expression: exp,
               newValue: newVal,
               oldValue: oldVal,
@@ -482,12 +638,12 @@
        * @methodOf decipher.history.service:History
        * @description
        * Register some expression(s) for watching.
-       * @param {(string|string[])} exps Array of expressions or one expression as a string
+       * @param {string|string[]} exps Array of expressions or one expression as a string
        * @param {Scope=} scope Scope; defaults to `$rootScope`
        * @param {string=} description Description of this change
        * @param {Object=} lazyOptions Options for lazy loading.  Only valid
        * property is `timeout` at this point
-       * @returns {Watch} {@link decipher.history.object:Watch Watch instance}
+       * @returns {Watch|Array} {@link decipher.history.object:Watch Watch instance} or array of them
        *
        * @example
        * <example module="decipher.history">
@@ -512,13 +668,15 @@
        */
       this.watch = function watch(exps, scope, description, lazyOptions) {
         if (isUndefined(exps)) {
-          throw 'expression required';
+          throw new Error('expression required');
         }
         scope = scope || $rootScope;
         description = description || '';
         var i,
           id = scope.$id,
           exp,
+          objs = [],
+          watchObj,
           model;
 
         if (!isArray(exps)) {
@@ -546,10 +704,11 @@
           descriptions[id][exp] = $interpolate(description)(scope);
 
           this._watch(exp, scope, false, lazyOptions);
-
+          watchObjs[id][exp] = watchObj = new Watch(exp, scope);
+          objs.push(watchObj);
         }
-        watchObjs[id][exp] = new Watch();
-        return watchObjs[id][exp];
+
+        return objs.length > 1 ? objs : objs[0];
       };
 
       /**
@@ -660,6 +819,14 @@
                   }
 
                   watchObjs[id][targetName] = watchObj;
+<<<<<<< HEAD
+=======
+
+                  locals.$on('$destroy', function () {
+                    _clear(scope);
+                  });
+
+>>>>>>> cac9187cc72d07303813a723f19362bbd531894d
                 });
 
               };
@@ -695,10 +862,13 @@
           watches[id][targetName] = scope.$watchCollection(valuesName,
             createDeepWatch(targetName, valueName, keyName,
               watchObj));
+<<<<<<< HEAD
 
           scope.$on('$destroy', function () {
             _clear(scope);
           });
+=======
+>>>>>>> cac9187cc72d07303813a723f19362bbd531894d
 
           return watchObj;
         };
@@ -715,6 +885,7 @@
         var id = scope.$id,
           i,
           nextSibling,
+<<<<<<< HEAD
           exp;
 
         /**
@@ -792,19 +963,50 @@
             doClear(lazyWatches);
           }
         }
+=======
+          exp,
+          clear = function clear(id, key) {
+            var zap = function zap(what) {
+              if (isDefined(what[id][key])) {
+                delete what[id][key];
+                if (Object.keys(what[id]).length === 0) {
+                  delete what[id];
+                }
+              }
+            };
+>>>>>>> cac9187cc72d07303813a723f19362bbd531894d
 
-        function clearAll(id) {
-          forEach(watches[id], function (watch) {
-            if (isFunction(watch)) {
-              watch();
+            if (isDefined(watches[id]) &&
+              isFunction(watches[id][key])) {
+              watches[id][key]();
             }
-          });
-          delete watches[id];
-          delete history[id];
-          delete pointers[id];
-          delete lazyWatches[id];
-          delete watchObjs[id];
-        }
+            if (isDefined(watches[id])) {
+              zap(watches);
+            }
+            if (isDefined(watchObjs[id])) {
+              zap(watchObjs);
+            }
+            if (isDefined(history[id])) {
+              zap(history);
+            }
+            if (isDefined(pointers[id])) {
+              zap(pointers);
+            }
+            if (isDefined(lazyWatches[id])) {
+              zap(lazyWatches);
+            }
+          },
+
+          clearAll = function clearAll(id) {
+            forEach(watches[id], function (watch) {
+              return isFunction(watch) && watch();
+            });
+            delete watches[id];
+            delete history[id];
+            delete pointers[id];
+            delete lazyWatches[id];
+            delete watchObjs[id];
+          };
 
         if (isString(exps)) {
           exps = [exps];
@@ -868,7 +1070,8 @@
         }
         model = $parse(exp);
         oldValue = model(scope);
-        model.assign(scope, stack[pointer]);
+        // todo: assert there's no bug here with unassignable expressions
+        model.assign(scope, copy(stack[pointer]));
         this._watch(exp, scope, true);
         return {
           oldValue: oldValue,
@@ -889,13 +1092,14 @@
       this.undo = function undo(exp, scope) {
         scope = scope || $rootScope;
         if (isUndefined(exp)) {
-          throw 'expression required';
+          throw new Error('expression required');
         }
         var id = scope.$id,
           scopeHistory = history[id],
           stack,
           values,
-          pointer;
+          pointer,
+          watchObj;
 
         if (isUndefined(scopeHistory)) {
           throw 'could not find history for scope ' + id;
@@ -915,16 +1119,16 @@
         values = this._do(scope, exp, stack, pointer);
         if (isDefined(watchObjs[id]) &&
           isDefined(watchObjs[id][exp])) {
-          watchObjs[id][exp]._fireUndoHandlers(exp, scope);
+          watchObj = watchObjs[id][exp];
+          watchObj._fireUndoHandlers(exp, scope);
+          watchObj._broadcast('History.undone', {
+            expression: exp,
+            newValue: values.newValue,
+            oldValue: values.oldValue,
+            description: descriptions[id][exp],
+            scope: scope
+          });
         }
-
-        $rootScope.$broadcast('History.undone', {
-          expression: exp,
-          newValue: values.newValue,
-          oldValue: values.oldValue,
-          description: descriptions[id][exp],
-          scope: scope
-        });
       };
 
       /**
@@ -973,7 +1177,8 @@
         var id = scope.$id,
           stack = history[id][exp],
           values,
-          pointer;
+          pointer,
+          watchObj;
 
         if (isUndefined(stack)) {
           throw 'could not find history in scope "' + id +
@@ -990,17 +1195,16 @@
 
         if (isDefined(watchObjs[id]) &&
           isDefined(watchObjs[id][exp])) {
-          watchObjs[id][exp]._fireRedoHandlers(exp, scope);
+          watchObj = watchObjs[id][exp];
+          watchObj._fireRedoHandlers(exp, scope);
+          watchObj._broadcast('History.redone', {
+            expression: exp,
+            oldValue: copy(values.newValue),
+            newValue: copy(values.oldValue),
+            description: descriptions[id][exp],
+            scope: scope
+          });
         }
-
-        $rootScope.$broadcast('History.redone', {
-          expression: exp,
-          oldValue: copy(values.newValue),
-          newValue: copy(values.oldValue),
-          description: descriptions[id][exp],
-          scope: scope
-        });
-
       };
 
       /**
@@ -1090,7 +1294,8 @@
         pointer = pointer || 0;
         var id = scope.$id,
           stack = history[id][exp],
-          values;
+          values,
+          watchObj;
 
         if (isUndefined(stack)) {
           $log.warn('nothing to revert');
@@ -1104,17 +1309,17 @@
 
         if (isDefined(watchObjs[id]) &&
           isDefined(watchObjs[id][exp])) {
-          watchObjs[id][exp]._fireRevertHandlers(exp, scope);
+          watchObj = watchObjs[id][exp];
+          watchObj._fireRevertHandlers(exp, scope);
+          watchObj._broadcast('History.reverted', {
+            expression: exp,
+            oldValue: copy(values.newValue),
+            newValue: copy(values.oldValue),
+            description: descriptions[id][exp],
+            scope: scope,
+            pointer: pointer
+          });
         }
-
-        $rootScope.$broadcast('History.reverted', {
-          expression: exp,
-          oldValue: copy(values.newValue),
-          newValue: copy(values.oldValue),
-          description: descriptions[id][exp],
-          scope: scope,
-          pointer: pointer
-        });
       };
 
       /**
@@ -1181,10 +1386,11 @@
         var _clear = bind(this, this._clear),
           _initStores = this._initStores,
           listener,
+          watchObj,
           child;
         scope = scope || $rootScope;
         if (!isFunction(fn)) {
-          throw 'transaction requires a function';
+          throw new Error('transaction requires a function');
         }
 
         child = scope.$new();
@@ -1210,7 +1416,8 @@
           }
         });
 
-        $rootScope.$broadcast('History.batchBegan', {
+        watchObjs[child.$id] = watchObj = new Watch(null, child);
+        watchObj._broadcast('History.batchBegan', {
           transaction: child,
           description: description
         });
@@ -1223,17 +1430,18 @@
         $timeout(function () {
           fn(child);
           scope.$apply();
-        }).then(function () {
+        })
+          .then(function () {
             listener();
             batching = false;
-            $rootScope.$broadcast('History.batchEnded', {
+            watchObj._broadcast('History.batchEnded', {
               transaction: child,
               description: description
             });
           });
 
-        watchObjs[child.$id] = new Watch(child);
-        return watchObjs[child.$id];
+
+        return watchObj;
       };
 
       /**
@@ -1253,9 +1461,10 @@
           parent = t.$parent,
           packets = {},
           nextSibling,
+          watchObj,
           nextSiblingLocals;
         if (!t || !isObject(t)) {
-          throw 'must pass a scope to rollback';
+          throw new Error('must pass a scope to rollback');
         }
 
         function _rollback(scope, comparisonScope) {
@@ -1306,6 +1515,8 @@
           }
         }
 
+        watchObj = watchObjs[t.$id];
+
         if (isDefined(parent) &&
           isDefined(history[parent.$id])) {
           _rollback(t, parent);
@@ -1318,11 +1529,11 @@
           }
           nextSibling = nextSibling.$$nextSibling;
         }
-        watchObjs[t.$id]._fireRollbackHandlers();
-
-        $rootScope.$broadcast('History.rolledback', packets);
+        watchObj._fireRollbackHandlers();
+        watchObj._broadcast('History.rolledback', packets);
 
       };
+
       /**
        * @ngdoc property
        * @name decipher.history.service:History#history
@@ -1382,5 +1593,15 @@
        * @type {{}}
        */
       this.watchObjs = watchObjs;
+
+      /**
+       * @ngdoc property
+       * @name decipher.history.service:History#Watch
+       * @propertyOf decipher.history.service:History
+       * @description
+       * Here's the Watch prototype for you to play with.
+       * @type {Watch}
+       */
+      this.Watch = Watch;
     });
 })();
